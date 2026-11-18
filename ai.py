@@ -52,7 +52,14 @@ def call_model(user_message, model, api_key):
     Send one request to Gemini. Returns (raw_text, info), where info holds
     the finish reason and token usage, for the log.
     """
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        # If Google is busy (503), rate-limited (429) or has another temporary server error,
+        # the SDK retries by itself: up to 4 attempts, waiting about 2s, 4s, 8s in between.
+        http_options=types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=4, initial_delay=2, max_delay=20),
+        ),
+    )
     response = client.models.generate_content(
         model=model,
         contents=user_message,
@@ -219,7 +226,10 @@ def ask(question, context, api_key=""):
         else:
             result["error"] = f"Gemini API error {error.code}: {error.message}"
     except errors.ServerError as error:
-        result["error"] = f"Gemini server error {error.code}. Try again later."
+        # 503 = the model is overloaded on Google's side (we already retried 4 times).
+        result["error"] = (f"Gemini server error {error.code}: {error.message} "
+                           "Google's servers are busy - try again in a minute, or set "
+                           "GEMINI_MODEL in .env to another model (e.g. gemini-3.5-flash).")
     except Exception as error:
         # Anything else, mostly network problems (no internet, timeout): show it instead of crashing.
         result["error"] = f"Could not get an answer from Gemini: {type(error).__name__}: {error}"
