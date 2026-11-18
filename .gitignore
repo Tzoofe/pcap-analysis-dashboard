@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Capture files and data (may contain private network addresses)
+*.pcap
+*.pcapng
+*.cap
+*.csv
+
+# Assignment documents and Office lock files
+*.docx
+~$*
+
+# macOS
+.DS_Store
