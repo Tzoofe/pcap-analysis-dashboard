@@ -3,6 +3,8 @@
 A local web dashboard that opens a PCAP/PCAPNG capture, runs Wireshark's `tshark` on it,
 and shows the same values you would find by hand in Wireshark: packet count, start/end
 time, duration, top endpoints, protocols, and HTTP request/response pairs.
+It also lets you ask questions about the capture in plain English, answered by Google's
+Gemini model with frame-level evidence.
 
 ## Install
 
@@ -12,8 +14,19 @@ Requirements: macOS (or Linux), Python 3.10+, and Wireshark (which includes `tsh
 git clone https://github.com/Tzoofe/pcap-analysis-dashboard.git
 cd pcap-analysis-dashboard
 python3 -m venv .venv                     # create a virtual environment in .venv/
-.venv/bin/pip install -r requirements.txt # install streamlit, pandas, plotly
+.venv/bin/pip install -r requirements.txt # install streamlit, pandas, plotly, google-genai, python-dotenv
 ```
+
+### Gemini API key (for the AI questions only)
+
+The dashboard works without a key; only the "Ask about this capture" section needs one.
+Get a free key at https://aistudio.google.com/apikey, then either:
+
+- **type it into the "Gemini API key" field** in the dashboard (it is kept only in the browser
+  session, never saved to disk or to the log), or
+- copy `.env.example` to `.env` and set `GEMINI_API_KEY=...` there. `.env` is in `.gitignore`.
+
+`GEMINI_MODEL` in `.env` chooses the model (default `gemini-3.8-flash`).
 
 ## Run
 
@@ -36,6 +49,11 @@ Command-line test (no UI), which prints the summary, the protocols and the HTTP 
 |---|---|
 | `pcap_parser.py` | All tshark and pandas logic. No UI code. |
 | `app.py` | The Streamlit UI only. |
+| `ai_context.py` | Builds the text sent to the AI from the extracted DataFrames, plus pre-computed facts. |
+| `prompts.py` | The system prompt (`SYSTEM_PROMPT`) and its version (`PROMPT_VERSION`). |
+| `ai.py` | Calls Gemini, parses the JSON answer, validates the evidence, logs every call. |
+| `ai_tests.py` + `ai_test_questions.json` | Command-line test of several questions against expected answers. |
+| `.env.example` | Template for `.env` (API key and model name). |
 | `requirements.txt` | Python packages (pinned versions). |
 
 ## Functions in `pcap_parser.py`
@@ -52,7 +70,9 @@ Command-line test (no UI), which prints the summary, the protocols and the HTTP 
 | `top_endpoints(packets, n)` | Counts packets per IP address, as sender or receiver. This matches the "Packets" column in Statistics → Endpoints. |
 | `protocol_counts(packets)` | Counts packets per value of the Protocol column. |
 | `packets_per_second(packets)` | Counts packets in each 1-second interval. Seconds with no packets get 0. |
-| `load_http_transactions(path)` | Returns one row per HTTP request, joined to its response through tshark's own `http.response_in` field. Requests with no response keep empty response columns. |
+| `load_http_transactions(path)` | Returns one row per HTTP request, joined to its response through tshark's own `http.response_in` field. Requests with no response keep empty response columns. Includes the request/response frame times and the `tcp.stream` number. |
+| `get_info_field(version)` | Returns `_ws.col.info` for Wireshark 4.2 and newer, `_ws.col.Info` for older versions. |
+| `load_tcp_stream(path, n)` | Every frame of one TCP connection (`-Y "tcp.stream == n"`): times, addresses, ports, flags, seq/ack, payload length, Info column. |
 
 ### tshark command-line options used
 
@@ -90,6 +110,11 @@ Command-line test (no UI), which prints the summary, the protocols and the HTTP 
 | `http.response.phrase` | Status text (OK, Not Found, …) |
 | `http.time` | In a response frame: seconds since the request ("Time since request") |
 | `http.content_type` | The response's `Content-Type` header |
+| `tcp.stream` | Index of the TCP connection (the number used by Follow → TCP Stream) |
+| `tcp.flags.str` | TCP flags as text, e.g. `·······AP···` (S=SYN, A=ACK, P=PUSH, F=FIN, R=RST) |
+| `tcp.seq`, `tcp.ack` | Relative sequence / acknowledgment numbers |
+| `tcp.len` | TCP payload length in bytes |
+| `_ws.col.info` (`_ws.col.Info` before 4.2) | The "Info" column exactly as Wireshark shows it |
 
 ## Dashboard sections (`app.py`)
 
@@ -108,3 +133,94 @@ Edge cases handled:
 - **Request without a response**: the response columns are left empty.
 
 Note: HTTPS traffic is encrypted (TLS), so tshark cannot show it as HTTP. Only plain HTTP (usually port 80) appears in the HTTP section.
+
+## AI questions (requirements 30–34)
+
+### How it works
+
+1. **Extract** (`pcap_parser.py`): the same DataFrames the dashboard already shows, plus the
+   frames of a selected TCP stream if the user chose one.
+2. **Build the context** (`ai_context.py`): turns that data into compact text. It contains:
+   - the capture summary
+   - protocol counts and the top endpoints
+   - the HTTP transactions as CSV
+   - pre-computed facts (see below)
+   - the selected stream's frames, with facts about that stream
+3. **Ask** (`ai.py`): sends the system prompt (`prompts.py`) plus the context and the question
+   to Gemini. The model must reply with JSON only:
+   `{"answer": ..., "evidence": [{"frame", "timestamp", "detail"}], "confidence": "high|medium|low"}`.
+4. **Validate and show** (`app.py`): the dashboard shows the answer, the confidence, and an
+   evidence table. Evidence rows that fail the check are highlighted in red. An expander shows
+   the exact context that was sent.
+
+### Why we send pre-computed facts and not the raw capture
+
+- **Size and privacy.** A capture can hold tens of thousands of packets (`capture.pcapng` has
+  28,559). Sending all of it is slow and expensive, and would send every packet to an
+  outside service. We send only a few KB of tables that we already extracted.
+- **Language models count badly.** Counting rows or finding the maximum in a table is exactly
+  where they make mistakes. So `ai_context.py` computes these in pandas: the slowest and
+  fastest transaction, requests per Host / Method / Status Code / TCP stream, and SYN/FIN/RST
+  frames and bytes per side in a stream. The prompt tells the model to read these numbers
+  instead of calculating them.
+- **Checkable.** Because the model sees only our extracted data, every frame it cites can be
+  checked against that same data.
+
+If a table is too long (more than 200 HTTP rows or 200 stream frames), it is cut. The
+context then says exactly which part is missing, and the prompt tells the model to mention it.
+
+### How evidence validation works
+
+The model's claims are only as good as its evidence, so `ai.validate_evidence()` checks every
+cited frame against the data we extracted:
+
+| Check | Meaning |
+|---|---|
+| `ok` | The frame is in the data we sent, and the timestamp matches (within 1 µs). |
+| `ok, but the timestamp is wrong` | The frame is real, but the model wrote a different time. |
+| `in capture, but not given to the AI` | The frame exists (1 ≤ frame ≤ packet count), but the model never saw it, so it guessed. |
+| `not found in capture` | The frame number does not exist: hallucinated evidence. |
+| `invalid frame number` | Not a number. |
+
+Invalid JSON from the model does not crash the dashboard: the error and the raw response are shown.
+
+### Logging (requirement 34)
+
+Every call is appended as one JSON line to `logs/ai_log.jsonl` (`logs/` is in `.gitignore`).
+Each line holds:
+- the time and the `PROMPT_VERSION`
+- the model
+- the question and the selected stream
+- the **full context** that was sent
+- the raw model response
+- the parsed answer and the evidence validation
+- any error, and the token usage
+
+The API key is never logged. Increase `PROMPT_VERSION` in `prompts.py` whenever you change
+the prompt, so before/after answers can be told apart in the log.
+
+### Testing against the manual analysis (requirement 33)
+
+Fill in the `"expected"` values in `ai_test_questions.json` from your Wireshark analysis, then run:
+
+```bash
+.venv/bin/python ai_tests.py capture.pcapng
+```
+
+For each question, the script prints the AI's answer, its evidence with the check result, and
+the expected value. `"stream"` selects a TCP stream to include, like the dashboard's selector.
+In `capture.pcapng`, the HTTP traffic is stream 58.
+
+## Documented AI failure case (requirement 34)
+
+### Question
+
+### What the AI answered
+
+### Correct answer (from Wireshark)
+
+### Why it was wrong
+
+### What I changed
+
+### Result after the fix

@@ -1,0 +1,27 @@
+[
+  {
+    "question": "Which HTTP request was the slowest, and what was its response time?",
+    "stream": null,
+    "expected": "FILL IN FROM MANUAL ANALYSIS"
+  },
+  {
+    "question": "Which Status Code was returned for the request to /favicon.ico?",
+    "stream": null,
+    "expected": "FILL IN FROM MANUAL ANALYSIS"
+  },
+  {
+    "question": "How many HTTP requests were sent to the host gaia.cs.umass.edu?",
+    "stream": null,
+    "expected": "FILL IN FROM MANUAL ANALYSIS"
+  },
+  {
+    "question": "What happened in this TCP stream? Describe the connection from the handshake to the end of the capture.",
+    "stream": 58,
+    "expected": "FILL IN FROM MANUAL ANALYSIS"
+  },
+  {
+    "question": "In which frame is the response to the request in frame 28362, and how long did the server take to answer?",
+    "stream": null,
+    "expected": "FILL IN FROM MANUAL ANALYSIS"
+  }
+]

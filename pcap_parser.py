@@ -55,6 +55,13 @@ def get_protocol_field(version):
     return "_ws.col.Protocol"
 
 
+def get_info_field(version):
+    """Name of the 'Info' column field. It was renamed in Wireshark 4.2, like Protocol."""
+    if version >= (4, 2):
+        return "_ws.col.info"
+    return "_ws.col.Info"
+
+
 # ---------------------------------------------------------------------------
 # Running tshark
 # ---------------------------------------------------------------------------
@@ -205,8 +212,10 @@ def packets_per_second(packets):
 
 HTTP_FIELDS = [
     "frame.number",
+    "frame.time_relative",          # seconds since the first packet (Wireshark's "Time" column)
     "ip.src", "ip.dst", "ipv6.src", "ipv6.dst",
     "tcp.srcport", "tcp.dstport",   # TCP source / destination port
+    "tcp.stream",                   # TCP connection index (Wireshark's "Follow TCP Stream" number)
     "http.request.method",          # GET, POST, ... (only in request frames)
     "http.host",                    # value of the Host: header
     "http.request.uri",             # the path, e.g. /index.html
@@ -240,6 +249,7 @@ def load_http_transactions(pcap_path):
 
     requests = pd.DataFrame({
         "request_frame": requests["frame.number"].astype(int),
+        "request_time": requests["frame.time_relative"].astype(float),
         "method": requests["http.request.method"],
         "host": requests["http.host"],
         "uri": requests["http.request.uri"],
@@ -248,10 +258,12 @@ def load_http_transactions(pcap_path):
         "dst_ip": requests["dst_ip"],
         "src_port": requests["tcp.srcport"],
         "dst_port": requests["tcp.dstport"],
+        "tcp_stream": requests["tcp.stream"],
         "response_in": requests["http.response_in"],   # still text; "" if there was no response
     })
     responses = pd.DataFrame({
         "response_frame": responses["frame.number"],
+        "response_frame_time": responses["frame.time_relative"],
         "status_code": responses["http.response.code"],
         "status_phrase": responses["http.response.phrase"],
         "response_time": responses["http.time"],
@@ -266,13 +278,53 @@ def load_http_transactions(pcap_path):
 
     # Convert text columns to numbers. errors="coerce" turns "" into NaN (= no value).
     # "Int64" (capital I) is pandas' integer type that allows missing values.
-    for column in ["response_frame", "status_code", "src_port", "dst_port"]:
+    for column in ["response_frame", "status_code", "src_port", "dst_port", "tcp_stream"]:
         transactions[column] = pd.to_numeric(transactions[column], errors="coerce").astype("Int64")
-    transactions["response_time"] = pd.to_numeric(transactions["response_time"], errors="coerce")
+    for column in ["response_time", "response_frame_time"]:
+        transactions[column] = pd.to_numeric(transactions[column], errors="coerce")
     # Missing text fields (no response) become "" so the table shows blanks.
     transactions[["status_phrase", "content_type"]] = transactions[["status_phrase", "content_type"]].fillna("")
 
     return transactions.sort_values("request_frame").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# One TCP stream (used by the AI feature)
+# ---------------------------------------------------------------------------
+
+def load_tcp_stream(pcap_path, stream_number):
+    """
+    Return every frame of one TCP connection, like Wireshark's filter "tcp.stream == N".
+    Columns: frame, time, src, dst, src_port, dst_port, flags, seq, ack, payload_len, length, info.
+    """
+    info_field = get_info_field(get_tshark_version(find_tshark()))
+    fields = [
+        "frame.number", "frame.time_relative", "frame.len",
+        "ip.src", "ip.dst", "ipv6.src", "ipv6.dst",
+        "tcp.srcport", "tcp.dstport",
+        "tcp.flags.str",   # the TCP flags as text, e.g. "·······AP···" (A=ACK, P=PUSH, S=SYN, F=FIN, R=RST)
+        "tcp.seq",         # relative sequence number (starts at 0, as Wireshark shows it)
+        "tcp.ack",         # relative acknowledgment number
+        "tcp.len",         # TCP payload length in bytes (0 for pure ACK/SYN/FIN packets)
+        info_field,        # the "Info" column exactly as Wireshark shows it
+    ]
+    # int() makes sure only a number goes into the filter text.
+    df, _ = run_tshark(pcap_path, fields, display_filter="tcp.stream == %d" % int(stream_number))
+
+    stream = pd.DataFrame()
+    stream["frame"] = df["frame.number"].astype(int)
+    stream["time"] = df["frame.time_relative"].astype(float)
+    stream["src"] = df["ip.src"].where(df["ip.src"] != "", df["ipv6.src"])
+    stream["dst"] = df["ip.dst"].where(df["ip.dst"] != "", df["ipv6.dst"])
+    stream["src_port"] = df["tcp.srcport"]
+    stream["dst_port"] = df["tcp.dstport"]
+    stream["flags"] = df["tcp.flags.str"]
+    stream["seq"] = df["tcp.seq"]
+    stream["ack"] = df["tcp.ack"]
+    stream["payload_len"] = df["tcp.len"]
+    stream["length"] = df["frame.len"].astype(int)
+    stream["info"] = df[info_field]
+    return stream
 
 
 # ---------------------------------------------------------------------------
