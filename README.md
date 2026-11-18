@@ -26,7 +26,9 @@ Get a free key at https://aistudio.google.com/apikey, then either:
   session, never saved to disk or to the log), or
 - copy `.env.example` to `.env` and set `GEMINI_API_KEY=...` there. `.env` is in `.gitignore`.
 
-`GEMINI_MODEL` in `.env` chooses the model (default `gemini-3.8-flash`).
+The model is chosen in the dashboard's **Gemini model** list (default `gemini-3.5-flash`, or
+`GEMINI_MODEL` from `.env`). If Gemini answers **503 (model overloaded / high demand)**, the
+request is retried automatically; if it still fails, pick another model in the list.
 
 ## Run
 
@@ -213,14 +215,39 @@ In `capture.pcapng`, the HTTP traffic is stream 58.
 
 ## Documented AI failure case (requirement 34)
 
-### Question
+An example of the dashboard's AI giving a wrong answer.
 
-### What the AI answered
+### Question sent to the AI
 
-### Correct answer (from Wireshark)
+> How many TCP packets are in this capture?
 
-### Why it was wrong
+- **Capture:** `capture2.pcapng`
+- **TCP stream selected:** none
+- **Model:** `gemini-3.5-flash-lite`
+- **Log entry:** `logs/ai_log.jsonl`, 2026-11-18 20:59:17
 
-### What I changed
+### The AI's answer
 
-### Result after the fix
+> There are 634 TCP packets in this capture.
+
+Confidence: **high**. Evidence: none.
+
+### The correct answer (from Wireshark)
+
+**1130 TCP packets.** To check it in Wireshark, type the display filter `tcp`; the status bar
+shows "Displayed: 1130".
+
+### Why the AI was wrong
+
+The AI took the number from the `TCP` row of the protocol table (634). That table counts
+Wireshark's **Protocol column**, which shows only the **highest** protocol in each packet.
+TLS runs on top of TCP, so TLS packets are also TCP packets, but they are listed under
+"TLSv1.2", "TLSv1.3" or "SSL":
+
+| Protocol column | Packets |
+|---|---|
+| TCP | 634 |
+| TLSv1.2 | 285 |
+| TLSv1.3 | 171 |
+| SSL | 40 |
+| **Total (filter `tcp`)** | **1130** |

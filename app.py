@@ -263,20 +263,28 @@ show_http_section(http)
 # The AI gets only data we already extracted (see ai_context.py), never the PCAP file.
 # ---------------------------------------------------------------------------
 st.header("Ask about this capture (AI)")
-st.caption(f"Model: {ai.get_model()}. The AI receives only the extracted tables and "
-           "pre-computed facts shown under 'Context sent to the AI', not the capture file.")
+st.caption("The AI receives only the extracted tables and pre-computed facts shown under "
+           "'Context sent to the AI', not the capture file.")
 
 # type="password" hides the key while typing. It is kept only in this browser session,
 # never written to disk or to the log.
 typed_key = st.text_input("Gemini API key", type="password",
                           help="Get a free key at https://aistudio.google.com/apikey. "
                                "If left empty, GEMINI_API_KEY from the .env file is used.")
+# Model dropdown: the .env model (or the default) is selected first.
+# If Google answers "503 high demand", choose another model here.
+choices = ai.MODEL_CHOICES if ai.get_model() in ai.MODEL_CHOICES else [ai.get_model()] + ai.MODEL_CHOICES
+model = st.selectbox("Gemini model", choices, index=choices.index(ai.get_model()),
+                     help="If you get error 503 (model overloaded), try another model.")
 if not ai.get_api_key(typed_key):
     st.info("Enter a Gemini API key above to use the AI questions. The rest of the dashboard works without it.")
 
 # Optional TCP stream: the stream numbers that appear in the HTTP table.
-stream_numbers = sorted(http["tcp_stream"].dropna().astype(int).unique()) if len(http) else []
-stream_choice = st.selectbox("TCP stream to include (optional)", ["none"] + stream_numbers,
+# Plain strings ("58"), not numpy numbers: the browser sends the choice back as text,
+# and numpy values may not match it, which made the choice jump back to "none".
+stream_numbers = sorted(int(n) for n in http["tcp_stream"].dropna().astype(int).unique()) if len(http) else []
+stream_options = ["none"] + [str(n) for n in stream_numbers]
+stream_choice = st.selectbox("TCP stream to include (optional)", stream_options, key="stream_choice",
                              help="Adds every frame of this stream (tcp.stream == N) to the AI context.")
 stream_number = None if stream_choice == "none" else int(stream_choice)
 stream = get_stream(uploaded.getvalue(), uploaded.name, stream_number) if stream_number is not None else None
@@ -290,8 +298,8 @@ if st.button("Ask", disabled=not ai.get_api_key(typed_key)):
     if question.strip() == "":
         st.warning("Type a question first.")
     else:
-        with st.spinner("Asking Gemini..."):
-            result = ai.ask(question, context, typed_key)
+        with st.spinner("Asking Gemini... (usually 5-20 seconds; up to ~2 minutes if Google is busy)"):
+            result = ai.ask(question, context, typed_key, model)
         # session_state keeps the answer when the page reruns (e.g. after clicking a table row).
         st.session_state["ai_result"] = result
         st.session_state["ai_question"] = question

@@ -19,7 +19,10 @@ from prompts import PROMPT_VERSION, SYSTEM_PROMPT
 # Read GEMINI_API_KEY and GEMINI_MODEL from the .env file (if it exists) into the environment.
 load_dotenv()
 
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODEL = "gemini-3.5-flash"
+# Models offered in the dashboard's dropdown. If one is overloaded (error 503), pick another.
+MODEL_CHOICES = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash",
+                 "gemini-3.8-flash", "gemini-3.5-flash-lite"]
 
 # Log file next to this script: logs/ai_log.jsonl (one JSON object per line).
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "ai_log.jsonl")
@@ -54,10 +57,13 @@ def call_model(user_message, model, api_key):
     """
     client = genai.Client(
         api_key=api_key,
-        # If Google is busy (503), rate-limited (429) or has another temporary server error,
-        # the SDK retries by itself: up to 4 attempts, waiting about 2s, 4s, 8s in between.
         http_options=types.HttpOptions(
-            retry_options=types.HttpRetryOptions(attempts=4, initial_delay=2, max_delay=20),
+            # Give up on one attempt after 40 seconds (the value is in milliseconds),
+            # so the dashboard never waits forever for a server that does not answer.
+            timeout=40_000,
+            # If Google is busy (503), rate-limited (429) or has another temporary server error,
+            # the SDK retries by itself: up to 3 attempts, waiting about 2s and 4s in between.
+            retry_options=types.HttpRetryOptions(attempts=3, initial_delay=2, max_delay=10),
         ),
     )
     response = client.models.generate_content(
@@ -182,14 +188,15 @@ def write_log(entry):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def ask(question, context, api_key=""):
+def ask(question, context, api_key="", model=""):
     """
     Ask the model a question about the capture.
     api_key: the key typed in the dashboard; if empty, GEMINI_API_KEY from .env is used.
+    model:   the model chosen in the dashboard; if empty, GEMINI_MODEL from .env (or the default).
     Returns a dict: answer, confidence, evidence (validated rows), error, raw_response, model.
     The key itself is never logged.
     """
-    model = get_model()
+    model = model or get_model()
     result = {"answer": "", "confidence": "", "evidence": [], "error": "",
               "raw_response": "", "model": model, "prompt_version": PROMPT_VERSION}
     info = {}
@@ -228,11 +235,15 @@ def ask(question, context, api_key=""):
     except errors.ServerError as error:
         # 503 = the model is overloaded on Google's side (we already retried 4 times).
         result["error"] = (f"Gemini server error {error.code}: {error.message} "
-                           "Google's servers are busy - try again in a minute, or set "
-                           "GEMINI_MODEL in .env to another model (e.g. gemini-3.5-flash).")
+                           "This model is busy on Google's side - choose another model "
+                           "in the 'Gemini model' list (or GEMINI_MODEL in .env) and ask again.")
     except Exception as error:
         # Anything else, mostly network problems (no internet, timeout): show it instead of crashing.
-        result["error"] = f"Could not get an answer from Gemini: {type(error).__name__}: {error}"
+        if "timeout" in type(error).__name__.lower() or "timed out" in str(error).lower():
+            result["error"] = ("Gemini did not answer within 40 seconds (3 attempts). Google is probably "
+                               "busy - choose another model in the 'Gemini model' list and ask again.")
+        else:
+            result["error"] = f"Could not get an answer from Gemini: {type(error).__name__}: {error}"
 
     # Log everything needed to reproduce and review this call (requirement 34).
     write_log({
